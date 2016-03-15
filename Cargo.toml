@@ -1,0 +1,16 @@
+[package]
+name = "dracl_client"
+version = "0.1.0"
+authors = ["Steven Allen <steven@stebalien.com>"]
+
+[dependencies]
+url = "*"
+protobuf = "*"
+rust-base58 = "*"
+lazy_static = "*"
+multipart = "*"
+hyper = "*"
+serde = "*"
+rustc-serialize = "*"
+# serde_json = "*"
+# serde_macros = "*"
