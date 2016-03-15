@@ -252,6 +252,7 @@ impl Object {
             }
         })
     }
+
     pub fn pin(&self) -> io::Result<()> {
         api::post("pin/add", &[("recursive", "true"), ("arg", &self.hash)]).and_then(|r| {
             if r.status.is_success() {
@@ -262,6 +263,7 @@ impl Object {
             }
         })
     }
+
     pub fn hash(&self) -> &str {
         &self.hash
     }
