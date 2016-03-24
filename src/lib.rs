@@ -1,12 +1,18 @@
-extern crate rustc_serialize;
+#![feature(custom_derive, plugin)]
+#![plugin(serde_macros)]
+extern crate serde;
+extern crate serde_json;
 extern crate hyper;
 extern crate protobuf;
 extern crate url;
 extern crate rust_base58 as base58;
 extern crate multipart;
 
+#[macro_use]
+extern crate lazy_static;
+
 mod ipfs_error {
-    #[derive(Debug, RustcDecodable)]
+    #[derive(Debug, Deserialize)]
     #[allow(non_snake_case)]
     pub struct Error {
         pub Message: String,
@@ -17,9 +23,7 @@ mod ipfs_error {
     pub const INVALID_REF: &'static str = "invalid ipfs ref path";
 }
 
-#[macro_use]
-extern crate lazy_static;
-
+#[allow(non_snake_case)]
 mod merkledag;
 
 use protobuf::{MessageStatic, Message};
@@ -90,18 +94,12 @@ impl ObjectEditor {
 
         while let Some(link) = links_iter.next() {
             let link = match link.object.0 {
-                ObjectRefInner::Link(size, hash) => {
+                ObjectRefInner::Link(size, hash) |
+                ObjectRefInner::Object(Object { size, hash, .. }) => {
                     Link {
                         name: link.name,
                         size: size,
                         hash: hash,
-                    }
-                }
-                ObjectRefInner::Object(object) => {
-                    Link {
-                        name: link.name,
-                        size: object.size,
-                        hash: object.hash,
                     }
                 }
                 ObjectRefInner::ObjectEditor(editor) => {
@@ -119,13 +117,14 @@ impl ObjectEditor {
                             return Err(CommitError {
                                 editor: ObjectEditor {
                                     data: self.data,
-                                    links: new_links.into_iter().map(|l| LinkEditor {
-                                        name: l.name,
-                                        object: ObjectRef(ObjectRefInner::Link(l.size, l.hash)),
-                                    }).chain(iter::once(LinkEditor {
-                                        name: link.name,
-                                        object: ObjectRef(ObjectRefInner::ObjectEditor(editor)),
-                                    })).chain(links_iter).collect(),
+                                    links: new_links
+                                        .into_iter()
+                                        .map(From::from)
+                                        .chain(iter::once(LinkEditor {
+                                            name: link.name,
+                                            object: ObjectRef(ObjectRefInner::ObjectEditor(editor)),
+                                        }))
+                                        .chain(links_iter).collect(),
                                 },
                                 error: error,
                             });
@@ -151,7 +150,7 @@ impl ObjectEditor {
 
         node.set_Data(self.data);
 
-        #[derive(RustcDecodable, Debug)]
+        #[derive(Deserialize, Debug)]
         #[allow(non_snake_case)]
         struct PutResult {
             Hash: String,
@@ -163,20 +162,17 @@ impl ObjectEditor {
                                           ("encoding", "json"),
                                           ("stream-channels", "true")],
                                         &node.write_to_bytes().unwrap()[..])
-            .and_then(parse_json)
-            .map(|resp: PutResult|resp.Hash) {
+                             .and_then(parse_json)
+                             .map(|resp: PutResult| resp.Hash) {
             Ok(hash) => hash,
             Err(e) => {
                 let data = node.take_Data();
                 return Err(CommitError {
                     error: e,
-                    editor: Object {
-                                size: size,
-                                hash: String::new(),
-                                links: new_links,
-                                data: data,
-                            }
-                            .edit(),
+                    editor: ObjectEditor {
+                        links: new_links.into_iter().map(From::from).collect(),
+                        data: data,
+                    },
                 });
             }
         };
@@ -245,9 +241,9 @@ impl Object {
                     ipfs_error::NOT_PINNED => Ok(()),
                     _ => {
                         debug_assert!(error.Message != ipfs_error::INVALID_REF,
-                        "sent an invalid ref to the server");
+                                      "sent an invalid ref to the server");
                         Err(io::Error::new(io::ErrorKind::Other, error.Message))
-                    },
+                    }
                 }
             }
         })
@@ -284,15 +280,7 @@ impl Object {
     pub fn edit(self) -> ObjectEditor {
         ObjectEditor {
             data: self.data,
-            links: self.links
-                       .into_iter()
-                       .map(|l| {
-                           LinkEditor {
-                               name: l.name,
-                               object: ObjectRef(ObjectRefInner::Link(l.size, l.hash)),
-                           }
-                       })
-                       .collect(),
+            links: self.links.into_iter().map(From::from).collect(),
         }
     }
 }
@@ -310,6 +298,15 @@ pub struct LinkEditor {
     pub object: ObjectRef,
 }
 
+impl From<Link> for LinkEditor {
+    fn from(link: Link) -> LinkEditor {
+        LinkEditor {
+            name: link.name,
+            object: ObjectRef(ObjectRefInner::Link(link.size, link.hash)),
+        }
+    }
+}
+
 impl LinkEditor {
     pub fn new<N: Into<String>, O: Into<ObjectRef>>(name: N, object: O) -> Self {
         LinkEditor {
@@ -325,34 +322,22 @@ impl Link {
     }
 }
 
-fn parse_json<R: Read, O: rustc_serialize::Decodable>(mut r: R) -> io::Result<O> {
-    let json = match rustc_serialize::json::Json::from_reader(&mut r) {
-        Ok(v) => v,
-        // FIXME
-        Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidData, e)),
-    };
-
-    let mut decoder = rustc_serialize::json::Decoder::new(json);
-
-    match rustc_serialize::Decodable::decode(&mut decoder) {
-        Ok(v) => Ok(v),
-        // FIXME
-        Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
-    }
+fn parse_json<R: Read, O: serde::Deserialize>(mut r: R) -> io::Result<O> {
+    use serde_json::error::Error::Io;
+    serde_json::from_reader(&mut r).map_err(|e| match e {
+        Io(e) => io::Error::new(io::ErrorKind::InvalidData, e),
+        e => io::Error::new(io::ErrorKind::InvalidData, e),
+    })
 }
 
 fn parse_proto<M: MessageStatic>(r: &mut Read) -> io::Result<M> {
-    match protobuf::parse_from_reader::<M>(r) {
-        Ok(v) => Ok(v),
-        Err(e) => {
-            match e {
-                protobuf::ProtobufError::IoError(e) => Err(e),
-                protobuf::ProtobufError::WireError(e) => {
-                    Err(io::Error::new(io::ErrorKind::InvalidData, e))
-                }
-            }
+    use protobuf::ProtobufError::*;
+    protobuf::parse_from_reader::<M>(r).map_err(|e| {
+        match e {
+            IoError(e) => e,
+            WireError(e) => io::Error::new(io::ErrorKind::InvalidData, e),
         }
-    }
+    })
 }
 
 /// Get an object.
@@ -386,13 +371,11 @@ pub fn get(object: &str) -> io::Result<Object> {
 fn main() {
     // println!("{:?}",
     // get("QmYNy6HLNiacH4yT3RHbNspgoB5yVQapM3uFZK8DHATTX1").unwrap());
-    let mut obj = ObjectEditor::new();
     let obj = get("QmTMqNJeTr38LqkqK842HV6oK6qGnohsGewUuGC44HrbyB").unwrap();
-    obj.unpin();
-    /*
-    obj.data.extend_from_slice(b"testing");
-    obj.links.push(LinkEditor::new("test",
-                                   get("QmYiH9pxCCrtbiiwPtiiazfSCmvmx8zvaqyeS7WdrCoDjz").unwrap()));
-    obj.commit().unwrap();
-    */
+    obj.unpin().unwrap();
+    // obj.data.extend_from_slice(b"testing");
+    // obj.links.push(LinkEditor::new("test",
+    // get("QmYiH9pxCCrtbiiwPtiiazfSCmvmx8zvaqyeS7WdrCoDjz").unwrap()));
+    // obj.commit().unwrap();
+    //
 }
