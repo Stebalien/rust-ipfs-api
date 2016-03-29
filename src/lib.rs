@@ -228,36 +228,48 @@ impl From<ObjectEditor> for ObjectRef {
     }
 }
 
+fn bool_to_str(b: bool) -> &'static str {
+    if b {
+        "true"
+    } else {
+        "false"
+    }
+}
+
 impl Object {
-    pub fn unpin(&self) -> io::Result<()> {
-        api::post("pin/rm", &[("recursive", "true"), ("arg", &self.hash)]).and_then(|r| {
-            if r.status.is_success() {
-                Ok(())
-            } else {
-                let error: ipfs_error::Error = try!(parse_json(r));
-                match &*error.Message {
-                    // We consider this to be a success. That is, the object is
-                    // no longer pinned.
-                    ipfs_error::NOT_PINNED => Ok(()),
-                    _ => {
-                        debug_assert!(error.Message != ipfs_error::INVALID_REF,
-                                      "sent an invalid ref to the server");
-                        Err(io::Error::new(io::ErrorKind::Other, error.Message))
+    pub fn unpin(&self, recursive: bool) -> io::Result<()> {
+        api::post("pin/rm",
+                  &[("recursive", bool_to_str(recursive)), ("arg", &self.hash)])
+            .and_then(|r| {
+                if r.status.is_success() {
+                    Ok(())
+                } else {
+                    let error: ipfs_error::Error = try!(parse_json(r));
+                    match &*error.Message {
+                        // We consider this to be a success. That is, the object is
+                        // no longer pinned.
+                        ipfs_error::NOT_PINNED => Ok(()),
+                        _ => {
+                            debug_assert!(error.Message != ipfs_error::INVALID_REF,
+                                          "sent an invalid ref to the server");
+                            Err(io::Error::new(io::ErrorKind::Other, error.Message))
+                        }
                     }
                 }
-            }
-        })
+            })
     }
 
-    pub fn pin(&self) -> io::Result<()> {
-        api::post("pin/add", &[("recursive", "true"), ("arg", &self.hash)]).and_then(|r| {
-            if r.status.is_success() {
-                Ok(())
-            } else {
-                let error: ipfs_error::Error = try!(parse_json(r));
-                Err(io::Error::new(io::ErrorKind::Other, error.Message))
-            }
-        })
+    pub fn pin(&self, recursive: bool) -> io::Result<()> {
+        api::post("pin/add",
+                  &[("recursive", bool_to_str(recursive)), ("arg", &self.hash)])
+            .and_then(|r| {
+                if r.status.is_success() {
+                    Ok(())
+                } else {
+                    let error: ipfs_error::Error = try!(parse_json(r));
+                    Err(io::Error::new(io::ErrorKind::Other, error.Message))
+                }
+            })
     }
 
     pub fn hash(&self) -> &str {
@@ -359,12 +371,35 @@ pub fn get(object: &str) -> io::Result<Object> {
                                 .collect();
     let data = value.take_Data();
     let size = links.iter().fold(0, |c, l| c + l.size) + data.len() as u64;
+    let idx = path.rfind('/').unwrap();
+    path.drain(..idx + 1);
+
     Ok(Object {
-        hash: object.to_owned(),
+        hash: path,
         data: data,
         size: size,
         links: links,
     })
+}
+
+pub fn resolve(path: &str, recursive: bool) -> io::Result<String> {
+    #[derive(Deserialize)]
+    #[allow(non_snake_case)]
+    struct Result {
+        Path: String,
+    }
+
+    let resp = try!(api::get("resolve",
+                             &[("encoding", "json"),
+                               ("recursive", bool_to_str(recursive)),
+                               ("arg", path)]));
+    if resp.status.is_success() {
+        let result: Result = try!(parse_json(resp));
+        Ok(result.Path)
+    } else {
+        let result: ipfs_error::Error = try!(parse_json(resp));
+        Err(io::Error::new(io::ErrorKind::Other, result.Message))
+    }
 }
 
 #[test]
@@ -372,7 +407,7 @@ fn main() {
     // println!("{:?}",
     // get("QmYNy6HLNiacH4yT3RHbNspgoB5yVQapM3uFZK8DHATTX1").unwrap());
     let obj = get("QmTMqNJeTr38LqkqK842HV6oK6qGnohsGewUuGC44HrbyB").unwrap();
-    obj.unpin().unwrap();
+    obj.unpin(true).unwrap();
     // obj.data.extend_from_slice(b"testing");
     // obj.links.push(LinkEditor::new("test",
     // get("QmYiH9pxCCrtbiiwPtiiazfSCmvmx8zvaqyeS7WdrCoDjz").unwrap()));
