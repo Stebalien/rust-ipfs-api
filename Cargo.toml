@@ -1,5 +1,5 @@
 [package]
-name = "dracl_client"
+name = "ipfs-api"
 version = "0.1.0"
 authors = ["Steven Allen <steven@stebalien.com>"]
 
