@@ -1,4 +1,4 @@
-#![feature(custom_derive, plugin)]
+#![feature(custom_derive, plugin, question_mark, associated_consts)]
 #![plugin(serde_macros)]
 extern crate serde;
 extern crate serde_json;
@@ -11,53 +11,90 @@ extern crate multipart;
 #[macro_use]
 extern crate lazy_static;
 
-mod ipfs_error {
-    #[derive(Debug, Deserialize)]
-    #[allow(non_snake_case)]
-    pub struct Error {
-        pub Message: String,
-        pub Code: u32,
-    }
-
-    pub const NOT_PINNED: &'static str = "not pinned";
-    pub const INVALID_REF: &'static str = "invalid ipfs ref path";
-}
-
 #[allow(non_snake_case)]
 mod merkledag;
 
+use std::error::Error as StdError;
 use protobuf::{MessageStatic, Message};
-use std::{mem, fmt, iter};
-use std::io::{self, Read};
+use std::fmt;
+use std::io;
 use base58::{ToBase58, FromBase58};
+use std::ops::Deref;
 
 mod api;
 
+use api::{Json, Protobuf, Ignore};
+
 pub use api::{set_api_endpoint, get_api_endpoint};
 
-pub enum Error {
-    Http(hyper::Error),
-    DecodeError(String),
-}
-
-#[derive(Debug, Clone)]
+/// An IPFS object.
+#[derive(Eq, PartialEq, Default, Debug, Clone)]
 pub struct Object {
-    size: u64,
-    hash: String,
-    data: Vec<u8>,
-    links: Vec<Link>,
+    pub data: Vec<u8>,
+    pub links: Vec<Link>,
 }
 
+/// An IPFS object that has been committed.
 #[derive(Debug, Clone)]
-pub struct ObjectEditor {
-    pub data: Vec<u8>,
-    pub links: Vec<LinkEditor>,
+pub struct CommittedObject {
+    reference: Reference,
+    object: Object,
+}
+
+impl From<CommittedObject> for Reference {
+    fn from(c: CommittedObject) -> Reference {
+        c.reference
+    }
+}
+
+impl Deref for CommittedObject {
+    type Target = Object;
+    fn deref(&self) -> &Object {
+        &self.object
+    }
+}
+
+impl Object {
+    /// Calculate the (current) size of the object.
+    pub fn size(&self) -> u64 {
+        self.data.len() as u64 + self.links.iter().fold(0, |c, l| c + l.object.size)
+    }
+
+    /// Get a child object.
+    ///
+    /// Behavior:
+    ///
+    /// * This method returns the first link with the given name.
+    /// * Except empty paths (you can't look up "").
+    /// * Except links with forward slashes ('/') in them. That is, "a/b/c"
+    ///   resolves to `self.links["a"].links["b"].links["c"]` (pseudocode).
+    pub fn get(&self, path: &str) -> io::Result<CommittedObject> {
+        if path == "" {
+            // Don't resolve ""
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "cannot resolve empty path"));
+        }
+        if path.starts_with("/") {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "expected relative path"));
+        }
+        let mut splits = path.splitn(1, '/');
+        let prefix = splits.next().unwrap();
+        let suffix = splits.next();
+        for link in &self.links {
+            if link.name == prefix {
+                return match suffix {
+                    Some("")|None => get(&link.object.hash),
+                    Some(suffix) => get(&format!("{}/{}", &link.object.hash, suffix))
+                };
+            }
+        }
+        Err(io::Error::new(io::ErrorKind::NotFound, "path lookup failed"))
+    }
 }
 
 #[derive(Debug)]
 pub struct CommitError {
     pub error: io::Error,
-    pub editor: ObjectEditor,
+    pub object: Object,
 }
 
 impl fmt::Display for CommitError {
@@ -81,96 +118,48 @@ impl From<CommitError> for io::Error {
     }
 }
 
-impl ObjectEditor {
-    pub fn new() -> ObjectEditor {
-        ObjectEditor {
+impl Object {
+    /// Create a new object.
+    pub fn new() -> Object {
+        Object {
             data: Vec::new(),
             links: Vec::new(),
         }
     }
-    pub fn commit(self) -> Result<Object, CommitError> {
-        let mut new_links: Vec<Link> = Vec::with_capacity(self.links.len());
-        let mut links_iter = self.links.into_iter();
 
-        while let Some(link) = links_iter.next() {
-            let link = match link.object.0 {
-                ObjectRefInner::Link(size, hash) |
-                ObjectRefInner::Object(Object { size, hash, .. }) => {
-                    Link {
-                        name: link.name,
-                        size: size,
-                        hash: hash,
-                    }
-                }
-                ObjectRefInner::ObjectEditor(editor) => {
-                    match editor.commit() {
-                        Ok(object) => {
-                            Link {
-                                name: link.name,
-                                size: object.size,
-                                hash: object.hash,
-                            }
-                        }
-                        Err(CommitError { error, editor }) => {
-                            // TODO: Trace error!
-                            // Roll back!
-                            return Err(CommitError {
-                                editor: ObjectEditor {
-                                    data: self.data,
-                                    links: new_links
-                                        .into_iter()
-                                        .map(From::from)
-                                        .chain(iter::once(LinkEditor {
-                                            name: link.name,
-                                            object: ObjectRef(ObjectRefInner::ObjectEditor(editor)),
-                                        }))
-                                        .chain(links_iter).collect(),
-                                },
-                                error: error,
-                            });
-                        }
-                    }
-                }
-            };
-            new_links.push(link);
-        }
-
-        let size = new_links.iter().fold(0, |c, l| c + l.size) + self.data.len() as u64;
-
+    /// Commit this object to IPFS.
+    pub fn commit(self) -> Result<CommittedObject, CommitError> {
         let mut node = merkledag::PBNode::new();
-        node.set_Links(new_links.iter()
-                                .map(|l| {
-                                    let mut link = merkledag::PBLink::new();
-                                    link.set_Name(l.name.to_owned());
-                                    link.set_Hash(l.hash.from_base58().unwrap());
-                                    link.set_Tsize(l.size);
-                                    link
-                                })
-                                .collect());
+        node.set_Links(self.links
+                           .iter()
+                           .map(|l| {
+                               let mut link = merkledag::PBLink::new();
+                               link.set_Name(l.name.to_owned());
+                               link.set_Hash(l.object.hash.from_base58().unwrap());
+                               link.set_Tsize(l.object.size);
+                               link
+                           })
+                           .collect());
 
         node.set_Data(self.data);
 
         #[derive(Deserialize, Debug)]
-        #[allow(non_snake_case)]
         struct PutResult {
-            Hash: String,
+            #[serde(rename="Hash")]
+            hash: String,
         }
 
         // TODO: To unwrap or not to unwrap?
-        let hash = match api::post_data("object/put",
-                                        &[("inputenc", "protobuf"),
-                                          ("encoding", "json"),
-                                          ("stream-channels", "true")],
-                                        &node.write_to_bytes().unwrap()[..])
-                             .and_then(parse_json)
-                             .map(|resp: PutResult| resp.Hash) {
-            Ok(hash) => hash,
+        let hash = match api::post_data::<Json, PutResult>("object/put",
+                                                           &[("inputenc", "protobuf")],
+                                                           &node.write_to_bytes().unwrap()[..]) {
+            Ok(PutResult { hash, .. } ) => hash,
             Err(e) => {
                 let data = node.take_Data();
                 return Err(CommitError {
                     error: e,
-                    editor: ObjectEditor {
-                        links: new_links.into_iter().map(From::from).collect(),
+                    object: Object {
+                        links: self.links,
                         data: data,
                     },
                 });
@@ -178,53 +167,17 @@ impl ObjectEditor {
         };
 
         let data = node.take_Data();
-        Ok(Object {
-            size: size,
-            hash: hash,
-            links: new_links,
+        let object = Object {
+            links: self.links,
             data: data,
+        };
+        Ok(CommittedObject {
+            reference: Reference {
+                hash: hash,
+                size: object.size(),
+            },
+            object: object,
         })
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct ObjectRef(ObjectRefInner);
-
-impl ObjectRef {
-    pub fn edit(&mut self) -> io::Result<&mut ObjectEditor> {
-        loop {
-            let object = match self.0 {
-                ObjectRefInner::Link(_, ref hash) => try!(get(hash)),
-                ObjectRefInner::Object(ref mut o) => {
-                    Object {
-                        links: mem::replace(&mut o.links, Vec::new()),
-                        data: mem::replace(&mut o.data, Vec::new()),
-                        hash: mem::replace(&mut o.hash, String::new()),
-                        size: o.size,
-                    }
-                }
-                ObjectRefInner::ObjectEditor(ref mut editor) => return Ok(editor),
-            };
-            self.0 = ObjectRefInner::ObjectEditor(object.edit());
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub enum ObjectRefInner {
-    Link(u64, String),
-    Object(Object),
-    ObjectEditor(ObjectEditor),
-}
-
-impl From<Object> for ObjectRef {
-    fn from(l: Object) -> Self {
-        ObjectRef(ObjectRefInner::Object(l))
-    }
-}
-impl From<ObjectEditor> for ObjectRef {
-    fn from(l: ObjectEditor) -> Self {
-        ObjectRef(ObjectRefInner::ObjectEditor(l))
     }
 }
 
@@ -236,185 +189,188 @@ fn bool_to_str(b: bool) -> &'static str {
     }
 }
 
-impl Object {
+impl CommittedObject {
+    /// Stat this object.
+    ///
+    /// Note: This method does not make any network calls.
+    pub fn stat(&self) -> Stat {
+        Stat {
+            hash: self.hash().to_owned(),
+            num_links: self.links.len() as u32,
+            data_size: self.data.len() as u32,
+            cumulative_size: self.size(),
+            _non_exhaustive: (),
+        }
+    }
+
+    /// Create a reference to this object.
+    pub fn reference(&self) -> &Reference {
+        &self.reference
+    }
+
+    /// Unpin this object.
     pub fn unpin(&self, recursive: bool) -> io::Result<()> {
-        api::post("pin/rm",
-                  &[("recursive", bool_to_str(recursive)), ("arg", &self.hash)])
-            .and_then(|r| {
-                if r.status.is_success() {
-                    Ok(())
-                } else {
-                    let error: ipfs_error::Error = try!(parse_json(r));
-                    match &*error.Message {
-                        // We consider this to be a success. That is, the object is
-                        // no longer pinned.
-                        ipfs_error::NOT_PINNED => Ok(()),
-                        _ => {
-                            debug_assert!(error.Message != ipfs_error::INVALID_REF,
-                                          "sent an invalid ref to the server");
-                            Err(io::Error::new(io::ErrorKind::Other, error.Message))
-                        }
-                    }
+        api::post::<Ignore, ()>("pin/rm", &[("recursive", bool_to_str(recursive)), ("arg", &self.reference.hash)])
+            .or_else(|e| {
+                if e.description() == api::ipfs_error::NOT_PINNED  {
+                    // We consider this to be a success. That is, the object is
+                    // no longer pinned.
+                    return Ok(());
                 }
+                debug_assert!(e.description() != api::ipfs_error::INVALID_REF, "sent an invalid ref to the server");
+                Err(e)
             })
     }
 
+    /// Pin this object.
     pub fn pin(&self, recursive: bool) -> io::Result<()> {
-        api::post("pin/add",
-                  &[("recursive", bool_to_str(recursive)), ("arg", &self.hash)])
-            .and_then(|r| {
-                if r.status.is_success() {
-                    Ok(())
-                } else {
-                    let error: ipfs_error::Error = try!(parse_json(r));
-                    Err(io::Error::new(io::ErrorKind::Other, error.Message))
-                }
-            })
+        api::post::<Ignore, ()>("pin/add", &[("recursive", bool_to_str(recursive)), ("arg", &self.reference.hash)])
     }
 
+    /// Get the IPFS multihash hash of the object.
     pub fn hash(&self) -> &str {
-        &self.hash
+        &self.reference.hash
     }
-    pub fn data(&self) -> &[u8] {
-        &self.data
+
+    /// Get the (precomputed) size of the object
+    pub fn size(&self) -> u64 {
+        self.reference.size
     }
-    pub fn links<'a>(&'a self) -> &[Link] {
-        &self.links[..]
-    }
-    pub fn get(&self, name: &str) -> io::Result<Object> {
-        if name == "" {
-            // Don't resolve ""
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "cannot resolve empty path"));
-        }
-        // This way, we can get a/b/c in one go.
-        get(&[&self.hash[..], name].join("/"))
-    }
-    pub fn edit(self) -> ObjectEditor {
-        ObjectEditor {
-            data: self.data,
-            links: self.links.into_iter().map(From::from).collect(),
-        }
+
+    /// Edit the object.
+    pub fn edit(self) -> Object {
+        self.object
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Eq, PartialEq, Debug, Clone)]
 pub struct Link {
     pub name: String,
-    pub size: u64,
-    pub hash: String,
+    pub object: Reference,
 }
 
-#[derive(Debug, Clone)]
-pub struct LinkEditor {
-    pub name: String,
-    pub object: ObjectRef,
+/// A thin reference to an object.
+#[derive(Eq, PartialEq, Debug, Clone)]
+pub struct Reference {
+    size: u64,
+    hash: String,
 }
 
-impl From<Link> for LinkEditor {
-    fn from(link: Link) -> LinkEditor {
-        LinkEditor {
-            name: link.name,
-            object: ObjectRef(ObjectRefInner::Link(link.size, link.hash)),
-        }
+impl fmt::Display for Reference {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "/ipfs/{}", self.hash)
     }
 }
 
-impl LinkEditor {
-    pub fn new<N: Into<String>, O: Into<ObjectRef>>(name: N, object: O) -> Self {
-        LinkEditor {
-            name: name.into(),
-            object: object.into(),
-        }
+impl Deref for Reference {
+    type Target = str;
+
+    #[inline]
+    fn deref(&self) -> &str {
+        &self.hash
     }
 }
 
-impl Link {
-    pub fn get(&self) -> io::Result<Object> {
-        get(&self.hash)
+impl Reference {
+    /// Get the referenced object.
+    pub fn get(&self) -> io::Result<CommittedObject> {
+        get(&self.hash).and_then(|v| if v.size() != self.size {
+            Err(io::Error::new(io::ErrorKind::InvalidData,
+                               "reference and referenced object sizes do not match"))
+        } else {
+            Ok(v)
+        })
     }
-}
 
-fn parse_json<R: Read, O: serde::Deserialize>(mut r: R) -> io::Result<O> {
-    use serde_json::error::Error::Io;
-    serde_json::from_reader(&mut r).map_err(|e| {
-        match e {
-            Io(e) => io::Error::new(io::ErrorKind::InvalidData, e),
-            e => io::Error::new(io::ErrorKind::InvalidData, e),
-        }
-    })
-}
-
-fn parse_proto<M: MessageStatic>(r: &mut Read) -> io::Result<M> {
-    use protobuf::ProtobufError::*;
-    protobuf::parse_from_reader::<M>(r).map_err(|e| {
-        match e {
-            IoError(e) => e,
-            WireError(e) => io::Error::new(io::ErrorKind::InvalidData, e),
-        }
-    })
+    /// Get the size of the referenced object.
+    pub fn size(&self) -> u64 {
+        self.size
+    }
 }
 
 /// Get an object.
-pub fn get(path: &str) -> io::Result<Object> {
-    let mut path = try!(resolve(path, true));
+pub fn get(path: &str) -> io::Result<CommittedObject> {
+    let mut path = resolve(path, true)?;
 
-    let mut value: merkledag::PBNode = try!(api::get("object/get",
-                                                     &[("encoding", "protobuf"), ("arg", &path)])
-                                                .and_then(|mut r| {
-                                                    parse_proto(&mut r as &mut Read)
-                                                }));
+
+    let mut value = api::get::<Protobuf, merkledag::PBNode>("object/get", &[("arg", &path)])?;
+
     let links: Vec<Link> = value.take_Links()
                                 .into_iter()
                                 .map(|mut l| {
                                     Link {
                                         name: l.take_Name(),
-                                        hash: l.take_Hash().to_base58(),
-                                        size: l.get_Tsize(),
+                                        object: Reference {
+                                            hash: l.take_Hash().to_base58(),
+                                            size: l.get_Tsize(),
+                                        },
                                     }
                                 })
                                 .collect();
-    let data = value.take_Data();
-    let size = links.iter().fold(0, |c, l| c + l.size) + data.len() as u64;
+
     let idx = path.rfind('/').unwrap();
     path.drain(..idx + 1);
 
-    Ok(Object {
-        hash: path,
-        data: data,
-        size: size,
+    let object = Object {
+        data: value.take_Data(),
         links: links,
+    };
+    Ok(CommittedObject {
+        reference: Reference {
+            size: object.size(),
+            hash: path,
+        },
+        object: object,
     })
 }
 
+/// Resolve an IPFS path.
 pub fn resolve(path: &str, recursive: bool) -> io::Result<String> {
     #[derive(Deserialize)]
-    #[allow(non_snake_case)]
-    struct Result {
-        Path: String,
+    struct ResolveResult {
+        #[serde(rename="Path")]
+        path: String,
     }
 
-    let resp = try!(api::get("resolve",
-                             &[("encoding", "json"),
-                               ("recursive", bool_to_str(recursive)),
-                               ("arg", path)]));
-    if resp.status.is_success() {
-        let result: Result = try!(parse_json(resp));
-        Ok(result.Path)
-    } else {
-        let result: ipfs_error::Error = try!(parse_json(resp));
-        Err(io::Error::new(io::ErrorKind::Other, result.Message))
-    }
+    let resp = api::get::<Json, ResolveResult>("resolve", &[("recursive", bool_to_str(recursive)), ("arg", path)])?;
+    Ok(resp.path)
+}
+
+#[derive(Deserialize)]
+pub struct Stat {
+    #[serde(rename="Hash")]
+    pub hash: String,
+    #[serde(rename="NumLinks")]
+    pub num_links: u32,
+    #[serde(rename="DataSize")]
+    pub data_size: u32,
+    #[serde(rename="CumulativeSize")]
+    pub cumulative_size: u64,
+
+    #[doc(hidden)]
+    #[serde(default)]
+    _non_exhaustive: (),
+}
+
+/// Lookup object stats.
+pub fn stat(path: &str) -> io::Result<Stat> {
+    api::get::<Json, Stat>("object/stat", &[("arg", path)])
+}
+
+/// Get a reference to an object.
+///
+/// This is useful when you want to link to an object but don't want to materialize it.
+///
+/// Note: This will still download the object.
+pub fn lookup(path: &str) -> io::Result<Reference> {
+    let stats = stat(&path)?;
+    Ok(Reference {
+        hash: stats.hash,
+        size: stats.cumulative_size,
+    })
 }
 
 #[test]
 fn main() {
-    // println!("{:?}",
-    // get("QmYNy6HLNiacH4yT3RHbNspgoB5yVQapM3uFZK8DHATTX1").unwrap());
-    let obj = get("QmTMqNJeTr38LqkqK842HV6oK6qGnohsGewUuGC44HrbyB").unwrap();
-    obj.unpin(true).unwrap();
-    // obj.data.extend_from_slice(b"testing");
-    // obj.links.push(LinkEditor::new("test",
-    // get("QmYiH9pxCCrtbiiwPtiiazfSCmvmx8zvaqyeS7WdrCoDjz").unwrap()));
-    // obj.commit().unwrap();
-    //
+    //println!("{:?}", get("/ipfs/Qme3UVucKczKbMwpx3HUR9cTej99YMMiGoNencRaKpGyk2/test\0basdf"))
 }
