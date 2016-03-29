@@ -336,9 +336,11 @@ impl Link {
 
 fn parse_json<R: Read, O: serde::Deserialize>(mut r: R) -> io::Result<O> {
     use serde_json::error::Error::Io;
-    serde_json::from_reader(&mut r).map_err(|e| match e {
-        Io(e) => io::Error::new(io::ErrorKind::InvalidData, e),
-        e => io::Error::new(io::ErrorKind::InvalidData, e),
+    serde_json::from_reader(&mut r).map_err(|e| {
+        match e {
+            Io(e) => io::Error::new(io::ErrorKind::InvalidData, e),
+            e => io::Error::new(io::ErrorKind::InvalidData, e),
+        }
     })
 }
 
@@ -353,9 +355,11 @@ fn parse_proto<M: MessageStatic>(r: &mut Read) -> io::Result<M> {
 }
 
 /// Get an object.
-pub fn get(object: &str) -> io::Result<Object> {
+pub fn get(path: &str) -> io::Result<Object> {
+    let mut path = try!(resolve(path, true));
+
     let mut value: merkledag::PBNode = try!(api::get("object/get",
-                                                     &[("encoding", "protobuf"), ("arg", object)])
+                                                     &[("encoding", "protobuf"), ("arg", &path)])
                                                 .and_then(|mut r| {
                                                     parse_proto(&mut r as &mut Read)
                                                 }));
