@@ -20,6 +20,8 @@ pub struct Object {
 }
 
 /// An IPFS object that has been committed.
+///
+/// Dereferences to an (immutable) [Object](struct.Object.html).
 #[derive(Debug, Clone)]
 pub struct CommittedObject {
     reference: Reference,
@@ -47,7 +49,7 @@ impl Object {
 
     /// Get a child object.
     ///
-    /// Behavior:
+    /// # Behavior
     ///
     /// * This method returns the first link with the given name.
     /// * Except empty paths (you can't look up "").
@@ -76,9 +78,12 @@ impl Object {
     }
 }
 
+/// The error returned when an object fails to commit.
 #[derive(Debug)]
 pub struct CommitError {
+    /// The error.
     pub error: io::Error,
+    /// The object that failed to commit.
     pub object: Object,
 }
 
@@ -171,7 +176,7 @@ impl CommittedObject {
         stat::stat_object(self)
     }
 
-    /// Create a reference to this object.
+    /// Get a reference to this object.
     pub fn reference(&self) -> &Reference {
         &self.reference
     }
