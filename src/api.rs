@@ -7,27 +7,10 @@ use hyper::{self, net};
 use hyper::client::pool::Pool;
 use hyper::method::Method;
 use hyper::client::request::Request;
-use protobuf::{self, MessageStatic};
 
-use serde;
-use serde_json;
+use encoding::{Json, Encoding};
 
 const API_VERSION: &'static str = "v0";
-
-
-#[derive(Debug, Deserialize)]
-pub struct IpfsError {
-    #[serde(rename="Message")]
-    pub message: String,
-    #[serde(rename="Code")]
-    pub code: u32,
-}
-
-pub mod ipfs_error {
-    pub const NOT_PINNED: &'static str = "not pinned";
-    pub const INVALID_REF: &'static str = "invalid ipfs ref path";
-}
-
 
 thread_local! {
     static CONN_POOL: Pool<net::DefaultConnector> = Pool::new(Default::default())
@@ -49,49 +32,19 @@ lazy_static! {
     });
 }
 
-pub trait Encoding<T> {
-    const ENCODING: Option<&'static str>;
-    fn parse(reader: &mut Read) -> io::Result<T>;
+
+#[derive(Debug, Deserialize)]
+struct IpfsError {
+    #[serde(rename="Message")]
+    pub message: String,
+    #[serde(rename="Code")]
+    pub code: u32,
 }
 
-pub struct Json;
-pub struct Ignore;
-pub struct Protobuf;
-
-impl Encoding<()> for Ignore {
-    const ENCODING: Option<&'static str> = None;
-    fn parse(_: &mut Read) -> io::Result<()> {
-        Ok(())
-    }
+pub mod ipfs_error {
+    pub const NOT_PINNED: &'static str = "not pinned";
+    pub const INVALID_REF: &'static str = "invalid ipfs ref path";
 }
-
-impl<T: serde::Deserialize> Encoding<T> for Json {
-    const ENCODING: Option<&'static str> = Some("json");
-    fn parse(r: &mut Read) -> io::Result<T> {
-        use serde_json::error::Error::Io;
-        serde_json::from_reader(r).map_err(|e| {
-            match e {
-                Io(e) => io::Error::new(io::ErrorKind::InvalidData, e),
-                e => io::Error::new(io::ErrorKind::InvalidData, e),
-            }
-        })
-    }
-}
-
-impl<T: MessageStatic> Encoding<T> for Protobuf {
-    const ENCODING: Option<&'static str> = Some("protobuf");
-
-    fn parse(r: &mut Read) -> io::Result<T> {
-        use protobuf::ProtobufError::*;
-        protobuf::parse_from_reader::<T>(r).map_err(|e| {
-            match e {
-                IoError(e) => e,
-                WireError(e) => io::Error::new(io::ErrorKind::InvalidData, e),
-            }
-        })
-    }
-}
-
 
 /// Set the IPFS API endpoint
 pub fn set_api_endpoint(url: Url) {
@@ -103,6 +56,15 @@ pub fn get_api_endpoint() -> Url {
     IPFS_BASE.read().unwrap().clone()
 }
 
+
+/// Helper.
+pub fn bool_to_str(b: bool) -> &'static str {
+    if b {
+        "true"
+    } else {
+        "false"
+    }
+}
 
 fn request(method: Method, url: Url) -> hyper::Result<Request<net::Fresh>> {
     CONN_POOL.with(|pool| Request::with_connector(method, url, pool))
