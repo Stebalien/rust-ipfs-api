@@ -22,10 +22,28 @@ pub struct Object {
 /// An IPFS object that has been committed.
 ///
 /// Dereferences to an (immutable) [Object](struct.Object.html).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq)]
 pub struct CommittedObject {
     reference: Reference,
     object: Object,
+}
+
+impl PartialEq<CommittedObject> for CommittedObject {
+    fn eq(&self, other: &Self) -> bool {
+        self.reference == other.reference
+    }
+}
+
+impl PartialEq<Object> for CommittedObject {
+    fn eq(&self, other: &Object) -> bool {
+        &self.object == other
+    }
+}
+
+impl PartialEq<CommittedObject> for Object {
+    fn eq(&self, other: &CommittedObject) -> bool {
+        self == &other.object
+    }
 }
 
 impl From<CommittedObject> for Reference {
