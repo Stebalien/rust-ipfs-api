@@ -21,13 +21,10 @@ extern crate lazy_static;
 #[allow(non_snake_case)]
 mod merkledag;
 
+pub mod object;
+pub mod name;
+
 mod api;
 mod encoding;
-mod stat;
-mod object;
-mod resolve;
 
 pub use api::{set_api_endpoint, get_api_endpoint};
-pub use stat::{Stat, stat};
-pub use object::{Object, CommitError, CommittedObject, Link, get};
-pub use resolve::{Reference, resolve, lookup};

@@ -17,13 +17,13 @@ macro_rules! unwrap {
 #[test]
 fn get_object() {
     unwrap! {
-        let obj = ipfs::Object {
+        let obj = ipfs::object::Object {
             data: b"testing"[..].to_owned(),
             links: vec![],
         };
         let obj = obj.commit()?;
 
-        let obj2 = ipfs::get(obj.hash())?;
+        let obj2 = ipfs::object::get(obj.hash())?;
         assert_eq!(obj, obj2);
         assert_eq!(&*obj, &*obj2);
         assert_eq!(obj.data, b"testing");

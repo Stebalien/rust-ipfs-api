@@ -1,3 +1,4 @@
+//! IPFS API for working with objects.
 use std::ops::Deref;
 use std::io;
 use std::fmt;
@@ -6,11 +7,10 @@ use std::error::Error as StdError;
 use base58::{ToBase58, FromBase58};
 use protobuf::{MessageStatic, Message};
 
-use resolve::{resolve, Reference, new_reference};
 use merkledag;
+use name::resolve;
 use api;
 use encoding::{Json, Protobuf, Ignore};
-use stat;
 
 /// An IPFS object.
 #[derive(Eq, PartialEq, Default, Debug, Clone)]
@@ -183,7 +183,10 @@ impl Object {
             data: data,
         };
         Ok(CommittedObject {
-            reference: new_reference(object.size(), hash),
+            reference: Reference {
+                size: object.size(),
+                hash: hash,
+            },
             object: object,
         })
     }
@@ -193,8 +196,14 @@ impl CommittedObject {
     /// Stat this object.
     ///
     /// Note: This method does not make any network calls.
-    pub fn stat(&self) -> stat::Stat {
-        stat::stat_object(self)
+    pub fn stat(&self) -> Stat {
+        Stat {
+            hash: self.hash().to_owned(),
+            num_links: self.links.len() as u32,
+            data_size: self.data.len() as u32,
+            cumulative_size: self.size(),
+            _non_exhaustive: (),
+        }
     }
 
     /// Get a reference to this object.
@@ -260,7 +269,10 @@ pub fn get(path: &str) -> io::Result<CommittedObject> {
                                 .map(|mut l| {
                                     Link {
                                         name: l.take_Name(),
-                                        object: new_reference(l.get_Tsize(), l.take_Hash().to_base58()),
+                                        object: Reference {
+                                            size: l.get_Tsize(),
+                                            hash: l.take_Hash().to_base58(),
+                                        },
                                     }
                                 })
                                 .collect();
@@ -273,8 +285,105 @@ pub fn get(path: &str) -> io::Result<CommittedObject> {
         links: links,
     };
     Ok(CommittedObject {
-        reference: new_reference(object.size(), path),
+        reference: Reference {
+            size: object.size(),
+            hash: path,
+        },
         object: object,
     })
 }
 
+/// Status of an IPFS object.
+///
+/// Returned from [stat](fn.stat.html).
+#[derive(Deserialize)]
+pub struct Stat {
+    /// The object's hash.
+    #[serde(rename="Hash")]
+    pub hash: String,
+
+    /// The number of links in the object.
+    #[serde(rename="NumLinks")]
+    pub num_links: u32,
+
+    /// The size of the object's data field.
+    #[serde(rename="DataSize")]
+    pub data_size: u32,
+
+    /// The total size of the object and it's children.
+    #[serde(rename="CumulativeSize")]
+    pub cumulative_size: u64,
+
+    #[doc(hidden)]
+    #[serde(default)]
+    _non_exhaustive: (),
+}
+
+/// Lookup information about an object.
+///
+/// This *will* cause the IPFS node to fetch the object but won't try to
+/// materialize it (so it's faster than get, especially if the object hash been
+/// cached).
+pub fn stat(path: &str) -> io::Result<Stat> {
+    api::get::<Json, Stat>("object/stat", &[("arg", path)])
+}
+
+/// A thin reference to an object.
+///
+/// Dereferences to the object's hash.
+#[derive(Eq, PartialEq, Debug, Clone)]
+pub struct Reference {
+    size: u64,
+    hash: String,
+}
+
+impl fmt::Display for Reference {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "/ipfs/{}", self.hash)
+    }
+}
+
+impl Deref for Reference {
+    type Target = str;
+
+    #[inline]
+    fn deref(&self) -> &str {
+        &self.hash
+    }
+}
+
+impl Reference {
+    /// Get the referenced object.
+    pub fn get(&self) -> io::Result<CommittedObject> {
+        get(&self.hash).and_then(|v| if v.size() != self.size {
+            Err(io::Error::new(io::ErrorKind::InvalidData,
+                               "reference and referenced object sizes do not match"))
+        } else {
+            Ok(v)
+        })
+    }
+
+    /// Get the size of the referenced object.
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// Get the hash of the referenced object.
+    pub fn hash(&self) -> &str {
+        &self.hash
+    }
+}
+
+
+/// Get a reference to an object.
+///
+/// This is useful when you want to link to an object but don't want to materialize it.
+///
+/// Note: This will still download the object.
+pub fn lookup(path: &str) -> io::Result<Reference> {
+    let stats = stat(&path)?;
+    Ok(Reference {
+        hash: stats.hash,
+        size: stats.cumulative_size,
+    })
+}
