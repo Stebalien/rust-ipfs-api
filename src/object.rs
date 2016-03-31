@@ -62,10 +62,6 @@ impl Deref for CommittedObject {
 }
 
 impl Object {
-    /// Calculate the (current) size of the object.
-    pub fn size(&self) -> u64 {
-        self.data.len() as u64 + self.links.iter().fold(0, |c, l| c + l.object.size())
-    }
 
     /// Get a child object.
     ///
@@ -159,10 +155,9 @@ impl Object {
             hash: String,
         }
 
+        let encoded = &node.write_to_bytes().unwrap()[..];
         // TODO: To unwrap or not to unwrap?
-        let hash = match api::post_data::<Json, PutResult>("object/put",
-                                                           &[("inputenc", "protobuf")],
-                                                           &node.write_to_bytes().unwrap()[..]) {
+        let hash = match api::post_data::<Json, PutResult>("object/put", &[("inputenc", "protobuf")], encoded) {
             Ok(PutResult { hash, .. } ) => hash,
             Err(e) => {
                 let data = node.take_Data();
@@ -183,7 +178,7 @@ impl Object {
         };
         Ok(CommittedObject {
             reference: Reference {
-                size: object.size(),
+                size: object.links.iter().fold(encoded.len() as u64, |s, l| s + l.object.size()),
                 hash: hash,
             },
             object: object,
@@ -192,12 +187,6 @@ impl Object {
 }
 
 impl CommittedObject {
-    /// Validate this object.
-    /// Currently, this only checks if the reference size is equal to the actual object size.
-    fn is_valid(&self) -> bool {
-        self.size() == self.object.size()
-    }
-
     /// Unpin this object.
     pub fn unpin(&self, recursive: bool) -> io::Result<()> {
         self.reference.unpin(recursive)
@@ -346,11 +335,7 @@ impl Reference {
             }
         };
 
-        if obj.is_valid() {
-            Ok(obj)
-        } else {
-            Err(io::Error::new(io::ErrorKind::InvalidData, "reference and referenced object sizes do not match"))
-        }
+        Ok(obj)
     }
 
     /// Get the size of the referenced object.

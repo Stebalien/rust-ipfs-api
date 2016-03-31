@@ -30,3 +30,18 @@ fn get_object() {
         assert_eq!(obj2.data, b"testing");
     }
 }
+
+#[test]
+fn publish() {
+    unwrap! {
+        let obj = ipfs::object::Object {
+            data: b"testing"[..].to_owned(),
+            links: vec![],
+        };
+        let obj = obj.commit()?;
+        ipfs::name::publish(&obj);
+        // TODO: lookup my name.
+        let r = ipfs::object::lookup("/ipns/Qme6Q6RCZ7GKmpcuzKDqEtZrisygpTnyneq1N8zchdgWYq")?;
+        assert_eq!(*obj.reference(), r);
+    }
+}
