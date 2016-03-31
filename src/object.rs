@@ -193,6 +193,17 @@ impl Object {
 }
 
 impl CommittedObject {
+
+    /// Unpin this object.
+    pub fn unpin(&self, recursive: bool) -> io::Result<()> {
+        self.reference.unpin(recursive)
+    }
+
+    /// Pin this object.
+    pub fn pin(&self, recursive: bool) -> io::Result<()> {
+        self.reference.pin(recursive)
+    }
+
     /// Stat this object.
     ///
     /// Note: This method does not make any network calls.
@@ -211,28 +222,9 @@ impl CommittedObject {
         &self.reference
     }
 
-    /// Unpin this object.
-    pub fn unpin(&self, recursive: bool) -> io::Result<()> {
-        api::post::<Ignore, ()>("pin/rm", &[("recursive", api::bool_to_str(recursive)), ("arg", &self.reference)])
-            .or_else(|e| {
-                if e.description() == api::ipfs_error::NOT_PINNED  {
-                    // We consider this to be a success. That is, the object is
-                    // no longer pinned.
-                    return Ok(());
-                }
-                debug_assert!(e.description() != api::ipfs_error::INVALID_REF, "sent an invalid ref to the server");
-                Err(e)
-            })
-    }
-
-    /// Pin this object.
-    pub fn pin(&self, recursive: bool) -> io::Result<()> {
-        api::post::<Ignore, ()>("pin/add", &[("recursive", api::bool_to_str(recursive)), ("arg", &self.reference)])
-    }
-
     /// Get the IPFS multihash hash of the object.
     pub fn hash(&self) -> &str {
-        &self.reference
+        self.reference.hash()
     }
 
     /// Get the (precomputed) size of the object
@@ -372,6 +364,26 @@ impl Reference {
     pub fn hash(&self) -> &str {
         &self.hash
     }
+
+    /// Unpin this object.
+    pub fn unpin(&self, recursive: bool) -> io::Result<()> {
+        api::post::<Ignore, ()>("pin/rm", &[("recursive", api::bool_to_str(recursive)), ("arg", &self)])
+            .or_else(|e| {
+                if e.description() == api::ipfs_error::NOT_PINNED  {
+                    // We consider this to be a success. That is, the object is
+                    // no longer pinned.
+                    return Ok(());
+                }
+                debug_assert!(e.description() != api::ipfs_error::INVALID_REF, "sent an invalid ref to the server");
+                Err(e)
+            })
+    }
+
+    /// Pin this object.
+    pub fn pin(&self, recursive: bool) -> io::Result<()> {
+        api::post::<Ignore, ()>("pin/add", &[("recursive", api::bool_to_str(recursive)), ("arg", &self)])
+    }
+
 }
 
 
