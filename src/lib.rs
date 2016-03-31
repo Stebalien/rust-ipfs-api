@@ -31,8 +31,3 @@ pub use api::{set_api_endpoint, get_api_endpoint};
 pub use stat::{Stat, stat};
 pub use object::{Object, CommitError, CommittedObject, Link, get};
 pub use resolve::{Reference, resolve, lookup};
-
-#[test]
-fn main() {
-    //println!("{:?}", get("/ipfs/Qme3UVucKczKbMwpx3HUR9cTej99YMMiGoNencRaKpGyk2/test\0basdf"))
-}
