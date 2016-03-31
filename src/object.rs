@@ -7,9 +7,8 @@ use std::error::Error as StdError;
 use base58::{ToBase58, FromBase58};
 use protobuf::{MessageStatic, Message};
 
-use merkledag;
-use name::resolve;
 use api;
+use merkledag;
 use encoding::{Json, Protobuf, Ignore};
 
 /// An IPFS object.
@@ -90,7 +89,7 @@ impl Object {
         for link in &self.links {
             if link.name == prefix {
                 return match suffix {
-                    Some("")|None => get(link.object.hash()),
+                    Some("")|None => link.object.get(),
                     Some(suffix) => get(&format!("{}/{}", link.object.hash(), suffix))
                 };
             }
@@ -193,6 +192,11 @@ impl Object {
 }
 
 impl CommittedObject {
+    /// Validate this object.
+    /// Currently, this only checks if the reference size is equal to the actual object size.
+    fn is_valid(&self) -> bool {
+        self.size() == self.object.size()
+    }
 
     /// Unpin this object.
     pub fn unpin(&self, recursive: bool) -> io::Result<()> {
@@ -250,39 +254,10 @@ pub struct Link {
 }
 
 /// Get an object.
+///
+/// This is a shortcut for `lookup(path)?.get()`.
 pub fn get(path: &str) -> io::Result<CommittedObject> {
-    let mut path = resolve(path, true)?;
-
-
-    let mut value = api::get::<Protobuf, merkledag::PBNode>("object/get", &[("arg", &path)])?;
-
-    let links: Vec<Link> = value.take_Links()
-                                .into_iter()
-                                .map(|mut l| {
-                                    Link {
-                                        name: l.take_Name(),
-                                        object: Reference {
-                                            size: l.get_Tsize(),
-                                            hash: l.take_Hash().to_base58(),
-                                        },
-                                    }
-                                })
-                                .collect();
-
-    let idx = path.rfind('/').unwrap();
-    path.drain(..idx + 1);
-
-    let object = Object {
-        data: value.take_Data(),
-        links: links,
-    };
-    Ok(CommittedObject {
-        reference: Reference {
-            size: object.size(),
-            hash: path,
-        },
-        object: object,
-    })
+    lookup(path)?.get()
 }
 
 /// Status of an IPFS object.
@@ -347,12 +322,35 @@ impl Deref for Reference {
 impl Reference {
     /// Get the referenced object.
     pub fn get(&self) -> io::Result<CommittedObject> {
-        get(&self.hash).and_then(|v| if v.size() != self.size {
-            Err(io::Error::new(io::ErrorKind::InvalidData,
-                               "reference and referenced object sizes do not match"))
+        let mut node = api::get::<Protobuf, merkledag::PBNode>("object/get", &[("arg", &self.hash)])?;
+        let links: Vec<Link> = node.take_Links()
+            .into_iter()
+            .map(|mut l| {
+                Link {
+                    name: l.take_Name(),
+                    object: Reference {
+                        size: l.get_Tsize(),
+                        hash: l.take_Hash().to_base58(),
+                    },
+                }
+            })
+            .collect();
+
+        let data = node.take_Data();
+
+        let obj = CommittedObject {
+            reference: self.clone(),
+            object: Object {
+                data: data,
+                links: links,
+            }
+        };
+
+        if obj.is_valid() {
+            Ok(obj)
         } else {
-            Ok(v)
-        })
+            Err(io::Error::new(io::ErrorKind::InvalidData, "reference and referenced object sizes do not match"))
+        }
     }
 
     /// Get the size of the referenced object.
@@ -383,15 +381,21 @@ impl Reference {
     pub fn pin(&self, recursive: bool) -> io::Result<()> {
         api::post::<Ignore, ()>("pin/add", &[("recursive", api::bool_to_str(recursive)), ("arg", &self)])
     }
-
 }
 
+impl AsRef<Reference> for CommittedObject {
+    fn as_ref(&self) -> &Reference {
+        &self.reference
+    }
+}
 
-/// Get a reference to an object.
+/// Get a reference to an object, recursively looking up any IPNS links on the
+/// way.
 ///
 /// This is useful when you want to link to an object but don't want to materialize it.
 ///
-/// Note: This will still download the object.
+/// Note: This will still cause the IPFS API node to download the object into
+/// it's block store.
 pub fn lookup(path: &str) -> io::Result<Reference> {
     let stats = stat(&path)?;
     Ok(Reference {
