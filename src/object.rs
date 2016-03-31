@@ -211,21 +211,25 @@ impl CommittedObject {
     }
 
     /// Get a reference to this object.
+    #[inline]
     pub fn reference(&self) -> &Reference {
         &self.reference
     }
 
     /// Get the IPFS multihash hash of the object.
+    #[inline]
     pub fn hash(&self) -> &str {
         self.reference.hash()
     }
 
     /// Get the (precomputed) size of the object
+    #[inline]
     pub fn size(&self) -> u64 {
         self.reference.size()
     }
 
     /// Edit the object.
+    #[inline]
     pub fn edit(self) -> Object {
         self.object
     }
@@ -312,6 +316,7 @@ impl Reference {
     /// Get the referenced object.
     pub fn get(&self) -> io::Result<CommittedObject> {
         let mut node = api::get::<Protobuf, merkledag::PBNode>("object/get", &[("arg", &self.hash)])?;
+
         let links: Vec<Link> = node.take_Links()
             .into_iter()
             .map(|mut l| {
@@ -327,23 +332,23 @@ impl Reference {
 
         let data = node.take_Data();
 
-        let obj = CommittedObject {
+        Ok(CommittedObject {
             reference: self.clone(),
             object: Object {
                 data: data,
                 links: links,
             }
-        };
-
-        Ok(obj)
+        })
     }
 
     /// Get the size of the referenced object.
+    #[inline]
     pub fn size(&self) -> u64 {
         self.size
     }
 
     /// Get the hash of the referenced object.
+    #[inline]
     pub fn hash(&self) -> &str {
         &self.hash
     }
@@ -369,6 +374,7 @@ impl Reference {
 }
 
 impl AsRef<Reference> for CommittedObject {
+    #[inline]
     fn as_ref(&self) -> &Reference {
         &self.reference
     }
