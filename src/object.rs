@@ -15,7 +15,10 @@ use stat;
 /// An IPFS object.
 #[derive(Eq, PartialEq, Default, Debug, Clone)]
 pub struct Object {
+    /// The object's data.
     pub data: Vec<u8>,
+
+    /// The object's links.
     pub links: Vec<Link>,
 }
 
@@ -234,9 +237,14 @@ impl CommittedObject {
     }
 }
 
+/// An IPFS link. See [Object](struct.Object.html).
 #[derive(Eq, PartialEq, Debug, Clone)]
 pub struct Link {
+    /// The link name.
+    ///
+    /// This can be arbitrary utf8 encoded text (but should be short).
     pub name: String,
+    /// The object to which this link points.
     pub object: Reference,
 }
 
